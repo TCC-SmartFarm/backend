@@ -6,3 +6,8 @@ TCC/
 ├── mqtt-broker/
 ├── mqtt-sub/
 └── docker-compose.yml
+
+
+
+DOCKER COMPOSE DEV
+-- mesma coisa, porem um container diferente apenas para ambiente de teste!
