@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
   # Desenvolvido em Go para alta performance e baixo consumo
@@ -36,12 +34,20 @@ services:
       retries: 5
 
   config-rabbit:
-    build: 
-      context: .
-      dockerfile: ./barramento-de-eventos # O Dockerfile que roda o config_rabbit.go
+    build: ./barramento-de-eventos # O Dockerfile que roda o config_rabbit.go
     depends_on:
       rabbitmq:
         condition: service_healthy # Só roda quando o RabbitMQ passar no healthcheck
+    networks:
+      - smartfarm-network
+
+  mqtt-sub:
+    build: ./mqtt-sub
+    container_name: mqtt-sub
+    restart: always
+    depends_on:
+      - mqtt-broker
+      - rabbitmq
     networks:
       - smartfarm-network
 
