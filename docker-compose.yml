@@ -1,3 +1,5 @@
+# atualizado em 05/05/2026 - 16:30
+
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
   # Desenvolvido em Go para alta performance e baixo consumo
@@ -50,6 +52,17 @@ services:
       - rabbitmq
     networks:
       - smartfarm-network
+
+  influx-connector:
+    build: ./influx-connector
+    container_name: influx-connector
+    restart: always
+    depends_on:
+      - rabbitmq
+    networks:
+      - smartfarm-network
+
+  
 
 # Rede isolada para comunicação segura entre os containers
 networks:

@@ -5,6 +5,7 @@ TCC/
 ├── barramento-de-eventos/
 ├── mqtt-broker/
 ├── mqtt-sub/
+├── influx-connector
 └── docker-compose.yml
 
 
