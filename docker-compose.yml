@@ -1,4 +1,4 @@
-# atualizado em 05/05/2026 - 16:30
+# atualizado em 11/05/2026 - 15:09
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -57,6 +57,8 @@ services:
     build: ./influx-connector
     container_name: influx-connector
     restart: always
+    env_file:
+      - ./influx-connector/.env
     depends_on:
       - rabbitmq
     networks:
