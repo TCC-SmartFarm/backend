@@ -1,0 +1,1 @@
+upgrade versão de influxdb2 para influxdb3 nos serviços influx-connector e api-service

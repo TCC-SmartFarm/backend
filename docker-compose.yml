@@ -1,4 +1,4 @@
-# atualizado em 11/05/2026 - 15:09
+# atualizado em 12/05/2026 - 18:12
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -64,7 +64,17 @@ services:
     networks:
       - smartfarm-network
 
-  
+  api-service:
+    build: ./api-service
+    container_name: api-service
+    restart: always
+    env_file:
+      - ./api-service/.env
+    ports:
+      - "3000:3000"
+    networks:
+      - smartfarm-network
+
 
 # Rede isolada para comunicação segura entre os containers
 networks:

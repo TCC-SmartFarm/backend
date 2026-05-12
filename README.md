@@ -5,10 +5,7 @@ TCC/
 ├── barramento-de-eventos/
 ├── mqtt-broker/
 ├── mqtt-sub/
-├── influx-connector
+├── influx-connector/
+├── api-service/
 └── docker-compose.yml
 
-
-
-DOCKER COMPOSE DEV
--- mesma coisa, porem um container diferente apenas para ambiente de teste!
