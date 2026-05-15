@@ -7,5 +7,6 @@ TCC/
 ├── mqtt-sub/
 ├── influx-connector/
 ├── api-service/
+├── cache-service/
 └── docker-compose.yml
 
