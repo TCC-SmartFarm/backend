@@ -1,4 +1,4 @@
-# atualizado em 15/05/2026 - 18:06
+# atualizado em 16/05/2026 - 11:12
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -48,6 +48,7 @@ services:
     container_name: mqtt-sub
     restart: always
     depends_on:
+      - cache-service
       - mqtt-broker
       - rabbitmq
     networks:
