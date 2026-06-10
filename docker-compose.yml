@@ -103,6 +103,25 @@ services:
     networks:
       - smartfarm-network
 
+  # Sensores falsos: publica leituras no broker a cada 15 min e popula o
+  # histórico de 30 dias no primeiro boot (marker no volume evita repetição)
+  sensor-simulator:
+    build: ./sensor-simulator
+    container_name: sensor-simulator
+    restart: always
+    environment:
+      - SEED_HISTORY=true
+      - TZ=America/Sao_Paulo
+    volumes:
+      - simulator-data:/data
+    depends_on:
+      - mqtt-broker
+    networks:
+      - smartfarm-network
+
+
+volumes:
+  simulator-data:
 
 # Rede isolada para comunicação segura entre os containers
 networks:
