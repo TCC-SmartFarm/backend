@@ -1,0 +1,150 @@
+# Stack de produção (VM Azure). Usa as imagens publicadas no GHCR pelo CI de
+# cada repositório — nada é buildado na VM. Deploy: o workflow do GitHub
+# Actions copia este arquivo + Caddyfile para ~/smartfarm e roda
+#   docker compose -f docker-compose.prod.yml pull && up -d
+#
+# Única porta exposta ao mundo: 80/443 (Caddy). MQTT, RabbitMQ, Redis e a API
+# ficam só na rede interna.
+
+name: smartfarm
+
+services:
+  mqtt-broker:
+    image: ghcr.io/tcc-smartfarm/mqtt-broker:latest
+    container_name: mqtt-broker
+    restart: unless-stopped
+    volumes:
+      - broker-data:/root/data/db
+    networks:
+      - smartfarm-network
+    # Sem porta no host: o simulador roda dentro da rede. Quando houver
+    # sensores LoRa reais, adicionar "1883:1883" + regra no NSG da Azure.
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    # mqtt-sub e cache-service discam este hostname hardcoded — não renomear
+    container_name: barramento-de-eventos
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin
+    networks:
+      - smartfarm-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  config-rabbit:
+    image: ghcr.io/tcc-smartfarm/barramento-de-eventos:latest
+    restart: "no" # one-shot: só cria exchange/fila e sai
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - smartfarm-network
+
+  mqtt-sub:
+    image: ghcr.io/tcc-smartfarm/mqtt-sub:latest
+    container_name: mqtt-sub
+    restart: unless-stopped
+    depends_on:
+      - mqtt-broker
+      - rabbitmq
+    networks:
+      - smartfarm-network
+
+  influx-connector:
+    image: ghcr.io/tcc-smartfarm/influx-connector:latest
+    container_name: influx-connector
+    restart: unless-stopped
+    env_file:
+      - ./env/influx-connector.env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - smartfarm-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    networks:
+      - smartfarm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cache-service:
+    image: ghcr.io/tcc-smartfarm/cache-service:latest
+    container_name: cache-service
+    restart: unless-stopped
+    env_file:
+      - ./env/cache-service.env
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - smartfarm-network
+
+  api-service:
+    image: ghcr.io/tcc-smartfarm/api-service:latest
+    container_name: api-service
+    restart: unless-stopped
+    env_file:
+      - ./env/api-service.env
+    networks:
+      - smartfarm-network
+
+  sensor-simulator:
+    image: ghcr.io/tcc-smartfarm/sensor-simulator:latest
+    container_name: sensor-simulator
+    restart: unless-stopped
+    environment:
+      - SEED_HISTORY=true
+      - TZ=America/Sao_Paulo
+    volumes:
+      - simulator-data:/data
+    depends_on:
+      - mqtt-broker
+    networks:
+      - smartfarm-network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificados Let's Encrypt — NUNCA rodar `down -v` na VM, senão o
+      # rate limit da LE (5 certs duplicados/semana) pode travar o HTTPS
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api-service
+    networks:
+      - smartfarm-network
+
+volumes:
+  broker-data:
+  redis-data:
+  simulator-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  smartfarm-network:
+    driver: bridge

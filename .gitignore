@@ -1,0 +1,14 @@
+# Cada serviço é um repositório git próprio — não versionar aqui
+api-service/
+barramento-de-eventos/
+cache-service/
+influx-connector/
+mqtt-broker/
+mqtt-sub/
+
+# Dados locais dos containers
+data/
+
+# Variáveis de ambiente
+.env
+env/

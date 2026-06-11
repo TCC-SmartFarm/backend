@@ -1,0 +1,5 @@
+# Proxy HTTPS da API. O certificado Let's Encrypt é emitido e renovado
+# automaticamente para o DNS label do IP público da VM.
+smartfarm-tcc.chilecentral.cloudapp.azure.com {
+	reverse_proxy api-service:3000
+}
