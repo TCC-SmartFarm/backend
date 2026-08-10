@@ -114,7 +114,9 @@ func genReading(s Sensor, ts time.Time, batteryStart time.Time, rng *rand.Rand) 
 
 	// Solo segue o ar com amortecimento; umidades inversas à temperatura
 	soilT := clamp(airT*0.6+8+(rng.Float64()-0.5)*1.6, 16, 28)
-	soilM := clamp(52+bias*30+10*math.Sin(2*math.Pi*float64(ts.Unix())/(86400*7))+(rng.Float64()-0.5)*6, 30, 75)
+	// Piso em 38, e não em 30: o limite de atenção do painel é `valor <= 30`, então
+	// encostar no piso deixaria um sensor saudável permanentemente em amarelo.
+	soilM := clamp(52+bias*30+10*math.Sin(2*math.Pi*float64(ts.Unix())/(86400*7))+(rng.Float64()-0.5)*6, 38, 75)
 	airH := clamp(110-2*airT+bias*10+(rng.Float64()-0.5)*6, 45, 90)
 
 	// Bateria: 100% no início, -20% a cada 30 dias, piso em 20%
