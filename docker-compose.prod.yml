@@ -137,6 +137,12 @@ services:
       # extrai do access token. O mqtt-sub tira este valor do tópico MQTT, então
       # ele precisa bater exatamente com o que o token traz.
       - "FARM=auth0|69cb0b64c7c55babb4694086"
+      # Conecta como admin porque a ACL do broker exige que o segundo nível do
+      # tópico seja igual ao usuário MQTT, e o broker só aceita credenciais
+      # fixas (fazenda0..3). Admin tem regra de ouro e publica em qualquer
+      # tópico. Some quando a ingestão passar para o network server.
+      - MQTT_USER=admin
+      - MQTT_PASS=admin
     volumes:
       - simulator-data:/data
     depends_on:
