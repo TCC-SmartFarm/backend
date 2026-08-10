@@ -7,14 +7,17 @@ import (
 	"time"
 )
 
-// Sensor descreve um dispositivo simulado. Os ids, nomes e posições foram
-// portados do script scripts/simulate_sensors.sh do front-end: 10 sensores ao
-// redor do centro da fazenda (-23.6484655, -46.5739827), ~0.001 grau ≈ 111 m.
+// Sensor descreve um dispositivo simulado, ao redor do centro da fazenda
+// (-23.6484655, -46.5739827); ~0.001 grau ≈ 111 m.
 type Sensor struct {
 	ID   string
 	Name string
 	Lat  string
 	Lon  string
+	// Scenario força parâmetros fora dos limites padrão do painel depois de a
+	// leitura ser gerada. Serve para o mapa exibir os três estados do pin
+	// enquanto não há hardware real cadastrado. nil = sensor saudável.
+	Scenario func(*Reading)
 }
 
 const (
@@ -26,17 +29,27 @@ func coord(center, offset float64) string {
 	return fmt.Sprintf("%.7f", center+offset)
 }
 
+// Conjunto de demonstração: três sensores cobrindo os estados do pin no mapa —
+// dentro dos limites, atenção e alerta. Os ids são os três primeiros do
+// conjunto anterior de propósito: o histórico deles já está no InfluxDB, então
+// as páginas de parâmetro continuam com gráficos populados.
 var sensors = []Sensor{
-	{"1e23a01", "Plantacao Norte", coord(centerLat, 0.0020), coord(centerLon, 0.0010)},
-	{"1e23a02", "Plantacao Sul", coord(centerLat, -0.0015), coord(centerLon, 0.0022)},
-	{"1e23a03", "Plantacao Leste", coord(centerLat, 0.0008), coord(centerLon, -0.0018)},
-	{"1e23a04", "Plantacao Oeste", coord(centerLat, -0.0025), coord(centerLon, 0.0015)},
-	{"1e23a05", "Estufa A", coord(centerLat, 0.0012), coord(centerLon, -0.0028)},
-	{"1e23a06", "Estufa B", coord(centerLat, -0.0007), coord(centerLon, 0.0007)},
-	{"1e23a07", "Pomar Velho", coord(centerLat, 0.0030), coord(centerLon, -0.0012)},
-	{"1e23a08", "Horta Central", coord(centerLat, -0.0018), coord(centerLon, 0.0025)},
-	{"1e23a09", "Pasto Alto", coord(centerLat, 0.0005), coord(centerLon, -0.0020)},
-	{"1e23a10", "Pasto Baixo", coord(centerLat, -0.0010), coord(centerLon, 0.0003)},
+	{
+		ID: "1e23a01", Name: "Plantacao Norte",
+		Lat: coord(centerLat, 0.0020), Lon: coord(centerLon, 0.0010),
+	},
+	{
+		ID: "1e23a02", Name: "Plantacao Sul",
+		Lat: coord(centerLat, -0.0015), Lon: coord(centerLon, 0.0022),
+		// 18% fica entre alertLow (15) e warnLow (20): pin amarelo, ícone de bateria.
+		Scenario: func(r *Reading) { r.Battery = 18 },
+	},
+	{
+		ID: "1e23a03", Name: "Plantacao Leste",
+		Lat: coord(centerLat, 0.0008), Lon: coord(centerLon, -0.0018),
+		// 14% está abaixo de alertLow (20): pin vermelho, ícone de gota.
+		Scenario: func(r *Reading) { r.SoilMoisture = 14 },
+	},
 }
 
 // Reading é o payload publicado no MQTT. O formato precisa bater exatamente
@@ -108,7 +121,7 @@ func genReading(s Sensor, ts time.Time, batteryStart time.Time, rng *rand.Rand) 
 	days := ts.Sub(batteryStart).Hours() / 24
 	batt := clamp(100-days*(20.0/30.0)+(rng.Float64()-0.5), 20, 100)
 
-	return Reading{
+	reading := Reading{
 		Name:            s.Name,
 		SoilTemperature: round2(soilT),
 		SoilMoisture:    round2(soilM),
@@ -120,4 +133,12 @@ func genReading(s Sensor, ts time.Time, batteryStart time.Time, rng *rand.Rand) 
 		Longitude:       s.Lon,
 		Timestamp:       ts.Unix(),
 	}
+
+	// Vale para toda a série, inclusive o histórico semeado: sem isso o gráfico
+	// mostraria o sensor saudável e só o último ponto em alerta.
+	if s.Scenario != nil {
+		s.Scenario(&reading)
+	}
+
+	return reading
 }

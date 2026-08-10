@@ -50,6 +50,11 @@ services:
     image: ghcr.io/tcc-smartfarm/mqtt-sub:latest
     container_name: mqtt-sub
     restart: unless-stopped
+    # OBRIGATÓRIO: o mqtt-sub faz log.Fatal se SUPABASE_URL/SUPABASE_KEY não
+    # estiverem definidas — ele consulta o Supabase para descobrir de quem é
+    # cada devEUI que chega do network server LoRa.
+    env_file:
+      - ./env/mqtt-sub.env
     depends_on:
       - mqtt-broker
       - rabbitmq
@@ -72,13 +77,21 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    # Publicado no IP PRIVADO da VM (nunca em 0.0.0.0) para que o api-service,
+    # rodando no Azure Container Apps, alcance o Redis pela VNet. O acesso é
+    # fechado por NSG: só a sub-rede do Container Apps (10.0.1.0/27) chega na
+    # 6379. A senha é a segunda camada, caso a regra de rede falhe.
+    ports:
+      - "10.0.0.4:6379:6379"
+    command: >
+      redis-server --save 60 1 --loglevel warning
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
     volumes:
       - redis-data:/data
     networks:
       - smartfarm-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -89,6 +102,8 @@ services:
     restart: unless-stopped
     env_file:
       - ./env/cache-service.env
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
     depends_on:
       redis:
         condition: service_healthy
@@ -97,12 +112,17 @@ services:
     networks:
       - smartfarm-network
 
+  # NOTA: este serviço sai daqui (junto com o caddy) quando o Azure Container Apps
+  # assumir a camada web. Mantido por ora para não deixar a API fora do ar durante
+  # a migração. Ver infra/provision-aca.sh.
   api-service:
     image: ghcr.io/tcc-smartfarm/api-service:latest
     container_name: api-service
     restart: unless-stopped
     env_file:
       - ./env/api-service.env
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
     networks:
       - smartfarm-network
 
