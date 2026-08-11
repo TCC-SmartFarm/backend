@@ -624,10 +624,17 @@ Por honestidade de registro, três limitações permanecem:
 
 ---
 
-## 9. Quando migrar da arquitetura B para a A
+## 9. Evolução: quando e para onde migrar
 
-A arquitetura enxuta não é permanente por princípio — é a adequada para a escala atual. Os gatilhos
-que justificam a migração:
+A arquitetura enxuta não é permanente por princípio — é a adequada para a escala atual. Há dois
+caminhos possíveis de evolução, e eles vão em direções opostas: um **sobe** para a arquitetura
+completa, materializando balanceador e Scale Set como recursos próprios; o outro **dissolve** a VM,
+substituindo os componentes com estado por serviços gerenciados. Qual faz sentido depende do que
+mudar primeiro — a carga ou o hardware de campo.
+
+### 9.1 Quando migrar para a arquitetura A
+
+Os gatilhos que justificam a migração:
 
 | Gatilho | Por quê |
 |---|---|
@@ -637,6 +644,101 @@ que justificam a migração:
 | Volume de ingestão além do que um `mqtt-sub` único absorve | Exige particionar o consumo (shared subscriptions) e clusterizar fila e cache |
 
 Enquanto nenhum deles ocorrer, a arquitetura B entrega o mesmo resultado funcional por 23% do custo.
+
+### 9.2 O caminho alternativo: dissolver a VM quando o sensor real entrar
+
+Há um segundo caminho, que o restante deste documento não avalia porque depende de um evento externo:
+**a entrada em operação do sensor LoRa real.** Quando isso acontecer, a VM perde a maior parte da sua
+razão de existir, e passa a ser possível eliminá-la — não subindo para a arquitetura A, mas
+substituindo os componentes com estado por equivalentes gerenciados.
+
+#### O que o simulador sustenta hoje
+
+Convém explicitar, porque é fácil subestimar: **o `sensor-simulator` é a única fonte de dados da
+plataforma.** Em agosto de 2026, uma escuta de 17 minutos no tópico do network server não recebeu
+nenhuma mensagem — não há hardware transmitindo. Todo o conteúdo do painel, e os 35 dias de série
+histórica no InfluxDB, são gerados por ele.
+
+E o simulador arrasta uma segunda peça: o `mqtt-broker` existe hoje **apenas para receber as
+publicações dele**. Esta seção do documento já registrava que o broker próprio estava fora do caminho
+de produção no desenho alvo; na prática ele voltou ao caminho justamente por causa do simulador.
+
+Com o sensor real, o sentido da conexão se inverte e ambos saem de cena:
+
+```
+hoje:    simulador ──▶ mqtt-broker ──▶ mqtt-sub ──▶ RabbitMQ ──▶ ...
+                       (hospedado na nossa VM)
+
+depois:  sensor LoRa ──▶ gateway ──▶ network server (ChirpStack, externo)
+                                            │
+                                            ▼  conexão de SAÍDA
+                                        mqtt-sub ──▶ RabbitMQ ──▶ ...
+```
+
+O `mqtt-sub` deixa de depender de um broker local e passa a ser cliente de um externo. A VM libera
+cerca de **257 MiB** (254,6 do broker e 2,8 do simulador), caindo de ~791 MB para ~534 MB de uso.
+
+#### O impedimento não é de infraestrutura
+
+Antes de qualquer mudança de hospedagem, há uma decisão de projeto pendente, descoberta ao inspecionar
+o decodificador do `mqtt-sub`: **o payload do sensor real não carrega tudo o que o painel exibe.**
+
+O formato do ChirpStack traz 15 bytes com cinco medidas. Faltam duas informações que hoje vêm do
+simulador:
+
+| Parâmetro | Simulador | Payload real (15 bytes) |
+|---|---|---|
+| Umidade do solo | Sim | Sim |
+| Umidade do ar | Sim | Sim |
+| Luminosidade | Sim | Sim |
+| Temperatura do ar | Sim | Sim |
+| Bateria | Sim | Sim |
+| **Temperatura do solo** | Sim | **Não** |
+| **Latitude / longitude** | Sim | **Não** |
+
+A ausência das coordenadas é a mais grave: o front só plota sensores com latitude e longitude
+definidas, de modo que **o mapa ficaria sem nenhum marcador**. Há três saídas possíveis, e a escolha
+não é de infraestrutura:
+
+1. O firmware passa a transmitir mais bytes;
+2. As coordenadas passam a vir do cadastro no Supabase — provavelmente a melhor opção, já que a
+   posição de um sensor fixo não muda a cada leitura e não precisa trafegar em cada pacote LoRa;
+3. O painel deixa de exibir esses dois parâmetros.
+
+#### Sequência sugerida
+
+Tirar o simulador é o **último** passo, não o primeiro:
+
+1. Confirmar que há sensor real transmitindo no network server;
+2. Decidir a origem da temperatura do solo e das coordenadas (o item anterior);
+3. Migrar o `mqtt-sub` para o network server — a branch `develop` dele já contém essa versão;
+4. Remover o `sensor-simulator` e o `mqtt-broker`;
+5. Opcionalmente, avaliar dispensar a VM por completo.
+
+#### O que o passo 5 significaria em custo
+
+Sem o `mqtt-broker`, desaparece o único componente que exigiria ingress TCP e volume persistente — o
+obstáculo que hoje inviabiliza mover a ingestão para o Container Apps. Restariam três trabalhadores
+sem estado, mais os dois componentes com estado, que virariam serviços gerenciados:
+
+| Item | US$/mês |
+|---|---|
+| 3 workers (`mqtt-sub`, `influx-connector`, `cache-service`), mínimo 1 réplica cada | 12,87 |
+| Azure Cache for Redis, tier B0 | 16,35 |
+| Azure Service Bus, tier Standard | ~10,00 |
+| **Total** | **≈ 39,22** |
+| | |
+| Modelo atual (VM + disco Standard SSD + IP público) | 46,14 |
+
+A economia direta é modesta — cerca de US$ 7/mês. O ganho relevante é outro: **eliminaria o ponto
+único de falha da ingestão**, a limitação que nem a arquitetura A nem a B resolvem (4.1). Serviços
+gerenciados trazem redundância embutida, coisa que uma VM única não tem.
+
+Há duas contrapartidas honestas. A primeira é que se perde a capacidade de desligar: hoje um
+`az vm deallocate` derruba a conta de US$ 46 para ~US$ 8, enquanto o Azure Cache for Redis e o Service
+Bus cobram por existirem, com ou sem tráfego — o piso subiria para cerca de US$ 26. A segunda é que o
+Service Bus não é RabbitMQ: protocolo e biblioteca diferentes, exigindo adaptar os quatro serviços que
+publicam ou consomem da exchange.
 
 ---
 
