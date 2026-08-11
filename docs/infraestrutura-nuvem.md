@@ -8,16 +8,18 @@
 > Preços coletados em agosto de 2026 na região **Brazil South**, via API de preços de varejo da
 > Azure. Câmbio de referência: **US$ 1,00 = R$ 5,10**.
 >
-> **Revisão:** atualizado após a integração da branch `develop`, que trocou o broker MQTT próprio
-> por um network server LoRaWAN externo e introduziu o Supabase como cadastro de dispositivos.
+> **Revisões:** atualizado após a integração da branch `develop`, que trocou o broker MQTT próprio
+> por um network server LoRaWAN externo e introduziu o Supabase como cadastro de dispositivos. Em
+> agosto de 2026 ganhou a seção 6, que documenta a execução da migração — o que efetivamente mudou
+> de lugar, por que apenas um serviço pôde sair da VM e o que substituiu o proxy reverso próprio.
 
 ---
 
 ## 1. Resumo executivo
 
-O SmartFarm roda hoje com **todos os componentes de servidor numa única máquina virtual** — o que,
-no modelo de referência adotado na disciplina de infraestrutura, corresponde à *Fase 2* do projeto:
-uma prova de conceito sem balanceamento de carga e sem alta disponibilidade.
+O SmartFarm rodava, até agosto de 2026, com **todos os componentes de servidor numa única máquina
+virtual** — o que, no modelo de referência adotado na disciplina de infraestrutura, corresponde à
+*Fase 2* do projeto: uma prova de conceito sem balanceamento de carga e sem alta disponibilidade.
 
 Este documento avalia o salto para as *Fases 3 e 4* daquele modelo (desacoplar o banco de dados e
 colocar a camada web atrás de um balanceador com escalabilidade automática) e conclui:
@@ -34,9 +36,18 @@ segurança em camadas e segredos gerenciados — porque a plataforma Azure Conta
 esses mecanismos. O que se abre mão é da *materialização* deles como recursos separados e
 configuráveis individualmente.
 
+> **Estado atual:** a arquitetura B foi **implementada em agosto de 2026**. O `api-service` roda no
+> Azure Container Apps e a VM ficou apenas com a camada de ingestão. A seção 6 documenta como a
+> migração foi feita, por que apenas um serviço mudou de lugar e o que se ganhou ao remover o proxy
+> reverso próprio.
+
 ---
 
-## 2. Ponto de partida: onde o SmartFarm está hoje
+## 2. Ponto de partida: o SmartFarm antes da migração
+
+> O desenho desta seção descreve o estado **anterior** a agosto de 2026, e é o ponto de partida da
+> análise. O `caddy` e o `api-service` que aparecem dentro da VM saíram dela na migração — ver 6.1 e
+> 6.5.
 
 ```
 Sensores LoRa ──▶ Gateway ──▶ networkserver2.maua.br  (ChirpStack, externo à nossa infra)
@@ -124,7 +135,7 @@ A tradução para a Azure é praticamente termo a termo:
 > para a camada web duplicaria a mesma informação em dois lugares — com risco de divergência
 > silenciosa entre eles. O custo dessa escolha é que o banco fica **fora da VNet**, acessado pela
 > internet com TLS e chave de API, e não por sub-rede privada. É a principal divergência consciente
-> em relação ao modelo (retomada em 7).
+> em relação ao modelo (retomada em 8).
 
 ---
 
@@ -341,7 +352,221 @@ O cenário realista é o primeiro: o painel faz cerca de duas requisições por 
 
 ---
 
-## 6. Comparação e decisão
+## 6. A migração executada (agosto de 2026)
+
+As seções anteriores comparam duas arquiteturas possíveis e justificam a escolha. Esta registra
+**como a arquitetura B foi efetivamente implementada** — e, mais do que a lista de comandos, procura
+responder às perguntas que naturalmente aparecem quando se olha o resultado pela primeira vez.
+
+### 6.1 O que saiu da VM, e o que não saiu
+
+A leitura mais comum, e equivocada, ao ver "migramos para contêineres" é imaginar que cada
+microsserviço ganhou sua própria máquina. Não foi isso. **Exatamente um serviço mudou de lugar.**
+
+| Antes | Depois |
+|---|---|
+| VM: mqtt-broker, RabbitMQ, mqtt-sub, influx-connector, Redis, cache-service, simulador, **api-service**, **caddy** | VM: mqtt-broker, RabbitMQ, mqtt-sub, influx-connector, Redis, cache-service, simulador |
+| — | Container Apps: **api-service** |
+
+Dos sete serviços, seis continuam exatamente onde estavam. O `caddy` foi removido sem substituto
+direto na VM, pelo motivo explicado em 6.5.
+
+Vale também desfazer uma segunda confusão: **o Azure Container Apps não é uma máquina virtual.** Não
+existe servidor para acessar por SSH, aplicar patch ou dimensionar. É um serviço *serverless*: entrega-se
+uma imagem e uma faixa de réplicas, e a plataforma decide onde e como executar. É justamente por isso
+que ele consegue escalar a zero — algo que uma VM não faz, já que ela está ligada ou desligada, e
+ligada custa o mesmo ociosa ou saturada.
+
+### 6.2 Uma aplicação, duas execuções
+
+Durante a migração, o `api-service` esteve rodando em dois lugares ao mesmo tempo. Isso costuma soar
+como "duas APIs diferentes", mas não é o caso — e a distinção esclarece bastante.
+
+Convém separar três conceitos que a linguagem do dia a dia mistura:
+
+| Conceito | Quantos existem |
+|---|---|
+| **A imagem** — o programa empacotado, publicado no GHCR | uma |
+| **O contêiner** — uma *execução* dessa imagem | duas, durante o corte |
+| **O host** — onde cada execução acontece | VM e Container Apps |
+
+Uma imagem pode ser executada quantas vezes se queira, em quantos lugares se queira. A analogia
+próxima é a de um executável: existe um arquivo, e dele podem-se abrir várias janelas, em máquinas
+diferentes, sem que sejam programas distintos.
+
+As duas execuções eram **intercambiáveis** porque liam exatamente as mesmas fontes: o mesmo Redis (o
+da VM, alcançado pela VNet), o mesmo InfluxDB, o mesmo Supabase, validando tokens do mesmo tenant do
+Auth0. A única diferença era o endereço de entrada. Foi essa equivalência que permitiu trocar o
+destino do front sem nenhuma janela de indisponibilidade — o assunto de 6.6.
+
+### 6.3 Por que só o `api-service` pôde sair
+
+A resposta curta está em 4.1: ele é o único componente *stateless*. Recebe a requisição, consulta
+Redis, InfluxDB e Supabase, devolve JSON e não guarda nada. Terminada a requisição, não há memória do
+que aconteceu. Duas cópias são indistinguíveis, e é isso que torna a replicação possível.
+
+Os demais não podem ser replicados — mas por **dois motivos distintos**, que vale não confundir,
+porque as soluções seriam diferentes:
+
+| Serviço | Impedimento | O que exigiria para escalar |
+|---|---|---|
+| `redis`, `rabbitmq` | **Estado local.** A informação mora dentro deles. Duas instâncias de Redis são dois caches divergentes; duas de RabbitMQ são duas filas separadas, e cada consumidor veria apenas parte das mensagens. | Clusterização: Redis cluster, quorum queues |
+| `mqtt-sub` | **Cardinalidade de consumo.** Ele não guarda estado nenhum. O problema é que mantém *uma* assinatura no tópico: duas cópias receberiam cada leitura duas vezes e a gravariam em duplicidade. | *Shared subscriptions* do MQTT 5, em que o broker reparte as mensagens entre um grupo |
+
+A distinção importa para a defesa do desenho: o `mqtt-sub` não é um obstáculo intransponível, é uma
+decisão de não pagar complexidade desnecessária no volume atual.
+
+### 6.4 O front é um caso à parte
+
+É tentador enquadrar o front na mesma categoria do `api-service` — "também é stateless, também
+escala". Mas ele é de outra natureza, e a diferença tem consequências práticas.
+
+O `api-service`, mesmo sem estado, **é um programa em execução**: tem processo, consome CPU e memória,
+precisa de réplicas. O front não executa nada no servidor. Ele é um conjunto de arquivos estáticos —
+HTML, CSS e JavaScript — que o Azure Static Web Apps apenas **entrega**, replicados por uma CDN
+global. Quem executa o código é o navegador do usuário.
+
+Disso decorre que:
+
+- Não há "instância" do front para escalar; há cópias dos arquivos em pontos de presença.
+- Não há problema de coerência: os arquivos são imutáveis dentro de um mesmo deploy.
+- Não há computação a cobrar, e por isso o plano gratuito basta.
+
+E decorre também uma armadilha operacional que custou tempo na prática. Como não existe servidor lendo
+configuração em tempo de execução, o endereço da API precisa ser **gravado dentro do JavaScript no
+momento do build**. No código está escrito `import.meta.env.VITE_API_BASE_URL`; no arquivo publicado,
+essa expressão não existe mais — foi substituída por um literal. Trocar a variável no GitHub, portanto,
+**não surte efeito algum até que uma nova compilação aconteça**. Apontar o front para o Container Apps
+exigiu alterar a variável de ambiente *e* disparar um novo deploy.
+
+### 6.5 O que era o Caddy, e por que ele saiu
+
+O `caddy` era um **proxy reverso**: um programa posicionado à frente da aplicação, que recebe as
+requisições da internet e as repassa. A nomenclatura confunde — um proxy comum fica diante do
+*cliente*, que navega através dele; um proxy **reverso** fica diante do *servidor*, e quem chega de
+fora conversa com ele acreditando falar com a própria aplicação.
+
+Ele existia por uma razão concreta: **o `api-service` não fala HTTPS.** É um binário Go servindo HTTP
+puro na porta 3000. E o navegador proíbe que uma página carregada por HTTPS faça requisições a HTTP —
+a regra de *mixed content*. Sem TLS na API, o painel simplesmente não conseguiria buscar dados.
+
+Implementar TLS dentro da aplicação seria possível, mas herdaria o trabalho recorrente: obter o
+certificado, provar a posse do domínio e **renová-lo antes do vencimento** — os da Let's Encrypt duram
+90 dias, e uma renovação esquecida derruba o serviço. O Caddy resolvia isso sozinho; sua configuração
+inteira eram três linhas úteis:
+
+```
+smartfarm-tcc.chilecentral.cloudapp.azure.com {
+	reverse_proxy api-service:3000
+}
+```
+
+O fluxo era:
+
+```
+Navegador ──HTTPS/443──▶ Caddy ──HTTP/3000──▶ api-service
+              (TLS termina aqui)    (rede interna do Docker)
+```
+
+A conexão criptografada terminava no Caddy — daí o termo **terminação TLS**. Do Caddy até a aplicação
+o tráfego era HTTP puro, o que é aceitável por nunca deixar a rede interna do Docker.
+
+**O ingress do Container Apps faz exatamente isso, embutido.** É um proxy Envoy que recebe na 443,
+termina TLS com certificado gerenciado pela plataforma e encaminha para a porta declarada no contêiner.
+A diferença é que a renovação deixa de ser responsabilidade do projeto.
+
+E faz uma coisa a mais que o Caddy não fazia: **distribui entre as réplicas**. O Caddy conhecia um
+destino fixo, `api-service:3000`, porque havia uma instância só. O Envoy sabe quantas réplicas existem
+a cada instante e reparte a carga — é ele o balanceador de carga desta arquitetura, o item que na
+tabela 5.1 substitui o Standard Load Balancer.
+
+A remoção teve ainda um efeito de segurança que o documento afirmava antes de ser verdade. Com o Caddy
+no ar, a VM mantinha as portas 80 e 443 abertas para a internet. Removido, restou apenas o SSH:
+
+| Porta | Antes | Depois |
+|---|---|---|
+| 22 (SSH) | aberta | aberta |
+| 80 | aberta | **fechada** |
+| 443 | aberta | **fechada** |
+
+Os volumes `caddy-data` e `caddy-config` foram preservados na VM, ainda que fora da declaração do
+compose. Eles guardam os certificados emitidos, e uma eventual reversão que precisasse reemiti-los
+esbarraria no limite de cinco certificados duplicados por semana da Let's Encrypt.
+
+### 6.6 A estratégia: corte em paralelo
+
+A migração poderia ter sido feita de uma vez — desligar a VM, subir o Container Apps, apontar o front.
+Optou-se pelo contrário, e a razão é que um corte direto só revela os problemas **depois** de o
+sistema já estar fora do ar.
+
+A sequência adotada foi:
+
+1. Provisionar a infraestrutura nova (sub-rede delegada, ambiente, Key Vault, aplicação), **sem tocar
+   no que estava servindo**;
+2. Validar a aplicação nova de forma independente — `/health` respondendo 200, rota autenticada
+   devolvendo 401 sem token, conexão com o Redis confirmada nos logs;
+3. Só então apontar o front para o endereço novo;
+4. Só depois de o tráfego real estar sendo atendido, remover a instância antiga e o Caddy.
+
+Entre os passos 1 e 4 as duas execuções coexistiram — a situação descrita em 6.2. O custo dessa
+coexistência é baixo (uma réplica ociosa e alguns megabytes na VM); o benefício é que, se a aplicação
+nova falhasse em qualquer ponto, bastava não avançar, sem nada a reverter.
+
+### 6.7 Escala a zero e o custo de ficar parado
+
+O Container Apps cobra por segundo de vCPU e memória alocados. Configurada a faixa de réplicas como
+**0 a 5**, a aplicação hiberna quando não há tráfego e o custo tende a zero — o terceiro cenário da
+tabela em 5.3, ali tratado como hipótese e agora efetivamente adotado.
+
+A contrapartida é a **partida a frio**. Medida na prática após um período de ociosidade:
+
+| Requisição | Tempo |
+|---|---|
+| Primeira (réplica hibernada) | **27,7 s** |
+| Segunda (réplica quente) | 0,28 s |
+
+O valor ficou acima da faixa de 5 a 20 s citada na documentação da plataforma, o que se explica pelo
+que a aplicação faz no boot: conectar ao Redis e baixar o JWKS do Auth0 antes de aceitar requisições.
+Como a primeira chamada acontece logo após o login, a percepção do usuário é de travamento. Para
+demonstrações, convém elevar o mínimo para 1 com antecedência:
+
+```bash
+az containerapp update -g rg-smartfarm -n api-service --min-replicas 1
+```
+
+Convém, porém, dimensionar a economia. A camada web hibernada poupa cerca de US$ 4/mês; **a VM
+responde por mais de 90% da conta** — cerca de US$ 44/mês, cobrados integralmente esteja ela ociosa ou
+não. Para períodos longos sem uso, o que efetivamente reduz o custo é desalocá-la:
+
+```bash
+az vm deallocate -g rg-smartfarm -n vm-smartfarm
+```
+
+`deallocate` difere de `stop`: apenas ele libera o hardware e interrompe a cobrança de computação.
+Permanecem cobrados o disco e o IP público, que existem independentemente do estado da máquina —
+algo em torno de US$ 5/mês com tudo desligado, contra os US$ 52 em operação plena. Como o IP é
+estático, o nome DNS sobrevive ao ciclo de desligar e religar.
+
+Uma dependência a registrar: o `api-service` no Container Apps lê o Redis que roda **na VM**. Com a
+máquina desalocada, a aplicação sobe normalmente mas falha nas rotas de dados. Na prática, os dois
+ligam e desligam juntos.
+
+### 6.8 O que a migração não resolveu
+
+Por honestidade de registro, três limitações permanecem:
+
+- **A ingestão continua sendo ponto único de falha.** Se a VM cair, param a coleta e o cache. O
+  Container Apps segue no ar, porém sem dado novo a servir. Nenhuma das duas arquiteturas avaliadas
+  resolvia isso (4.1).
+- **O banco relacional segue fora da VNet.** O Supabase é acessado pela internet com TLS e chave de
+  API — a divergência consciente discutida em 3.
+- **O ambiente de produção do front está desatualizado.** A branch `prod` é anterior à integração com
+  o backend e sua variável `VITE_API_BASE_URL` não está configurada. Ao promovê-la, será necessário
+  apontá-la para o Container Apps, sob pena de repetir o problema descrito em 6.4.
+
+---
+
+## 7. Comparação e decisão
 
 | | Arquitetura A (completa) | Arquitetura B (enxuta) |
 |---|---|---|
@@ -385,7 +610,7 @@ O cenário realista é o primeiro: o painel faz cerca de duas requisições por 
 
 ---
 
-## 7. Cobertura dos critérios de avaliação
+## 8. Cobertura dos critérios de avaliação
 
 | Critério | Como a arquitetura B atende | Lacuna |
 |---|---|---|
@@ -399,7 +624,7 @@ O cenário realista é o primeiro: o painel faz cerca de duas requisições por 
 
 ---
 
-## 8. Quando migrar da arquitetura B para a A
+## 9. Quando migrar da arquitetura B para a A
 
 A arquitetura enxuta não é permanente por princípio — é a adequada para a escala atual. Os gatilhos
 que justificam a migração:
@@ -415,7 +640,7 @@ Enquanto nenhum deles ocorrer, a arquitetura B entrega o mesmo resultado funcion
 
 ---
 
-## 9. Premissas e fontes
+## 10. Premissas e fontes
 
 **Premissas de cálculo**
 
