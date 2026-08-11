@@ -112,19 +112,11 @@ services:
     networks:
       - smartfarm-network
 
-  # NOTA: este serviço sai daqui (junto com o caddy) quando o Azure Container Apps
-  # assumir a camada web. Mantido por ora para não deixar a API fora do ar durante
-  # a migração. Ver infra/provision-aca.sh.
-  api-service:
-    image: ghcr.io/tcc-smartfarm/api-service:latest
-    container_name: api-service
-    restart: unless-stopped
-    env_file:
-      - ./env/api-service.env
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
-    networks:
-      - smartfarm-network
+  # O api-service e o caddy saíram daqui em ago/2026: a camada web passou para o
+  # Azure Container Apps, cujo ingress já termina TLS e distribui entre réplicas.
+  # A VM ficou só com a ingestão, que tem estado e não pode ser replicada
+  # (docs/infraestrutura-nuvem.md, seção 4.1). Sem o caddy, a VM não expõe mais
+  # as portas 80 e 443 — só o SSH. Ver infra/provision-aca.sh.
 
   sensor-simulator:
     image: ghcr.io/tcc-smartfarm/sensor-simulator:latest
@@ -150,30 +142,14 @@ services:
     networks:
       - smartfarm-network
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # Certificados Let's Encrypt — NUNCA rodar `down -v` na VM, senão o
-      # rate limit da LE (5 certs duplicados/semana) pode travar o HTTPS
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      - api-service
-    networks:
-      - smartfarm-network
-
 volumes:
   broker-data:
   redis-data:
   simulator-data:
-  caddy-data:
-  caddy-config:
+  # Os volumes caddy-data e caddy-config saíram da declaração junto com o serviço.
+  # Os dados continuam na VM (o compose não apaga volume nomeado), preservando os
+  # certificados Let's Encrypt caso seja preciso reverter — reemitir esbarraria no
+  # rate limit de 5 certificados duplicados por semana.
 
 networks:
   smartfarm-network:
