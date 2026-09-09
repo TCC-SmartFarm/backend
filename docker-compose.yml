@@ -1,4 +1,4 @@
-# atualizado em 20/07/2026 - 15:02
+# atualizado em 09/09/2026
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -48,7 +48,7 @@ services:
     container_name: mqtt-sub
     restart: always
     env_file:
-      - ./influx-connector/.env
+      - ./mqtt-sub/.env
     depends_on:
       - cache-service
       - mqtt-broker
