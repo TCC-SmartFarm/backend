@@ -3,14 +3,38 @@
 # Actions copia este arquivo + Caddyfile para ~/smartfarm e roda
 #   docker compose -f docker-compose.prod.yml pull && up -d
 #
-# Única porta exposta ao mundo: 80/443 (Caddy). MQTT, RabbitMQ, Redis e a API
-# ficam só na rede interna.
+# Portas expostas ao mundo: 80 e 443, do Caddy, que termina o TLS e repassa
+# para o api-service. MQTT, RabbitMQ e Redis não têm porta no host — só existem
+# dentro da rede do compose.
+#
+# ---------------------------------------------------------------------------
+# POR QUE AS IMAGENS ESTÃO PRESAS A UM DIGEST (set/2026)
+#
+# Estavam todas em `:latest`, e voltar para `:latest` derruba a telemetria.
+# A stack que funciona hoje é uma combinação específica de versões:
+#
+#   mqtt-sub, cache-service  10/ago — leem do mqtt-broker próprio, alimentado
+#                                     pelo sensor-simulator deste repositório
+#   influx-connector         10/jun — grava a série com a tag `deviceId`
+#
+# A `main` desses repositórios (`fix: functional version`) implementa a outra
+# arquitetura: o mqtt-sub assina `networkserver2.maua.br` e resolve o dono de
+# cada devEUI no Supabase, ignorando o broker próprio. É um conjunto coerente,
+# mas pressupõe dispositivo LoRa real transmitindo. Publicar essas imagens sem
+# um sensor em campo apaga a única fonte de dados que existe: o simulador
+# continua publicando e ninguém mais escuta.
+#
+# Por isso o CI de cada repositório volta a buildar e publicar (o `:latest` do
+# GHCR volta a seguir a main), mas a produção só anda quando alguém troca o
+# digest aqui, conscientemente. Quando o sensor real entrar, é trocar estes
+# digests pelos `:latest` e remover o sensor-simulator.
+# ---------------------------------------------------------------------------
 
 name: smartfarm
 
 services:
   mqtt-broker:
-    image: ghcr.io/tcc-smartfarm/mqtt-broker:latest
+    image: ghcr.io/tcc-smartfarm/mqtt-broker@sha256:672cbc28212c5148e79746c85f6a71cd896f2dd61b7621afbba23a3769c4c951
     container_name: mqtt-broker
     restart: unless-stopped
     volumes:
@@ -38,7 +62,7 @@ services:
       start_period: 30s
 
   config-rabbit:
-    image: ghcr.io/tcc-smartfarm/barramento-de-eventos:latest
+    image: ghcr.io/tcc-smartfarm/barramento-de-eventos@sha256:b2afd6bc7abdc1e7638c52999d6952bb36adf8ae9d115c6bab638c54da2fe5fd
     restart: "no" # one-shot: só cria exchange/fila e sai
     depends_on:
       rabbitmq:
@@ -47,7 +71,7 @@ services:
       - smartfarm-network
 
   mqtt-sub:
-    image: ghcr.io/tcc-smartfarm/mqtt-sub:latest
+    image: ghcr.io/tcc-smartfarm/mqtt-sub@sha256:776954fc80ced0f38dd496403e570499161928a73fc5610b32da48eb1e76c520
     container_name: mqtt-sub
     restart: unless-stopped
     # OBRIGATÓRIO: o mqtt-sub faz log.Fatal se SUPABASE_URL/SUPABASE_KEY não
@@ -62,7 +86,7 @@ services:
       - smartfarm-network
 
   influx-connector:
-    image: ghcr.io/tcc-smartfarm/influx-connector:latest
+    image: ghcr.io/tcc-smartfarm/influx-connector@sha256:3e09a0d87aa5ff29cd39faa31cb8aaa3d86cdf8e90d333068a3c509b8abc8622
     container_name: influx-connector
     restart: unless-stopped
     env_file:
@@ -77,33 +101,38 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
-    # Publicado no IP PRIVADO da VM (nunca em 0.0.0.0) para que o api-service,
-    # rodando no Azure Container Apps, alcance o Redis pela VNet. O acesso é
-    # fechado por NSG: só a sub-rede do Container Apps (10.0.1.0/27) chega na
-    # 6379. A senha é a segunda camada, caso a regra de rede falhe.
-    ports:
-      - "10.0.0.4:6379:6379"
+    # SEM porta no host e SEM senha, e as duas coisas andam juntas.
+    #
+    # A versão funcional da main abre o cliente Redis com redis.Options{Addr}
+    # apenas, sem campo Password: com --requirepass, o api-service e o
+    # cache-service levam NOAUTH, o cache nunca é gravado e /api/sensors/all
+    # responde 500. Como o api-service voltou para esta VM (set/2026), o Redis
+    # não precisa mais ser alcançável de fora: ele deixou de ser publicado em
+    # 10.0.0.4:6379 e agora só existe dentro da rede do compose, onde apenas os
+    # contêineres desta stack chegam. Trocou-se uma senha por não haver porta —
+    # exposição menor do que na configuração anterior, não maior.
+    #
+    # Se o api-service voltar para o Container Apps, isto precisa ser revisto:
+    # publicar a porta de novo sem senha deixaria o Redis aberto à VNet, e aí a
+    # senha volta a ser obrigatória (ou seja, o Password volta ao código).
     command: >
       redis-server --save 60 1 --loglevel warning
-      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
     volumes:
       - redis-data:/data
     networks:
       - smartfarm-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   cache-service:
-    image: ghcr.io/tcc-smartfarm/cache-service:latest
+    image: ghcr.io/tcc-smartfarm/cache-service@sha256:bab5fd21916bde67200baa8a4ec0fcdf53575a91e67ab909f8881a69d25c745c
     container_name: cache-service
     restart: unless-stopped
     env_file:
       - ./env/cache-service.env
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD obrigatorio}
     depends_on:
       redis:
         condition: service_healthy
@@ -112,14 +141,53 @@ services:
     networks:
       - smartfarm-network
 
-  # O api-service e o caddy saíram daqui em ago/2026: a camada web passou para o
-  # Azure Container Apps, cujo ingress já termina TLS e distribui entre réplicas.
-  # A VM ficou só com a ingestão, que tem estado e não pode ser replicada
-  # (docs/infraestrutura-nuvem.md, seção 4.1). Sem o caddy, a VM não expõe mais
-  # as portas 80 e 443 — só o SSH. Ver infra/provision-aca.sh.
+  # O api-service e o caddy saíram daqui em ago/2026, quando a camada web passou
+  # para o Azure Container Apps, e VOLTARAM em set/2026. O motivo do retorno é a
+  # versão funcional da main: sem campo Password no cliente Redis, servir a API
+  # de fora da VM exigiria publicar o Redis sem senha na VNet. Aqui dentro ele
+  # não precisa de porta no host nem de senha. O ingress do Container Apps, que
+  # fazia a terminação TLS, volta a ser papel do Caddy.
+  #
+  # A troca tem custo, e vale registrar: perde-se o balanceamento entre réplicas
+  # e a escala automática de 1 a 5 que a seção 6 de docs/infraestrutura-nuvem.md
+  # descreve. Volta a haver uma instância só. O ambiente do Container Apps
+  # continua provisionado (cae-smartfarm), então o caminho de volta é trocar
+  # esta seção pelo infra/provision-aca.sh — o que exige, antes, devolver o
+  # Password ao api-service e ao cache-service.
+  api-service:
+    image: ghcr.io/tcc-smartfarm/api-service:latest
+    container_name: api-service
+    restart: unless-stopped
+    # REDIS_ADDR=redis:6379 já vem daqui — nome de serviço na rede do compose.
+    # AUTH_DOMAIN, AUTH_AUDIENCE e RABBIT_URL continuam no arquivo e são
+    # ignorados pelo binário da main; ficam para quando o auth.go voltar.
+    env_file:
+      - ./env/api-service.env
+    depends_on:
+      - redis
+    networks:
+      - smartfarm-network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificados Let's Encrypt — NUNCA rodar `down -v` na VM, senão o
+      # rate limit da LE (5 certs duplicados/semana) pode travar o HTTPS
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api-service
+    networks:
+      - smartfarm-network
 
   sensor-simulator:
-    image: ghcr.io/tcc-smartfarm/sensor-simulator:latest
+    image: ghcr.io/tcc-smartfarm/sensor-simulator@sha256:cac22ab258b2d233e3e459bfd7ce958b277781d871a5e655eafa23afcfd09e41
     container_name: sensor-simulator
     restart: unless-stopped
     environment:
@@ -146,10 +214,11 @@ volumes:
   broker-data:
   redis-data:
   simulator-data:
-  # Os volumes caddy-data e caddy-config saíram da declaração junto com o serviço.
-  # Os dados continuam na VM (o compose não apaga volume nomeado), preservando os
-  # certificados Let's Encrypt caso seja preciso reverter — reemitir esbarraria no
-  # rate limit de 5 certificados duplicados por semana.
+  # Preservados quando o caddy saiu da declaração, em ago/2026. Foi o que tornou
+  # o retorno barato: o certificado emitido para o domínio da VM continua neste
+  # volume, então o Caddy sobe com HTTPS sem pedir nada à Let's Encrypt.
+  caddy-data:
+  caddy-config:
 
 networks:
   smartfarm-network:

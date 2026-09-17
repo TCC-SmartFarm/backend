@@ -2,6 +2,14 @@
 #
 # Provisiona a camada web do SmartFarm no Azure Container Apps.
 #
+# FORA DE USO desde set/2026 — mantido como o caminho de volta. O api-service
+# voltou a rodar na VM porque a versão funcional da main abre o cliente Redis
+# sem senha, e servi-lo de fora exigiria publicar o Redis na VNet desprotegido
+# (ver o comentário do serviço redis em docker-compose.prod.yml). O ambiente
+# cae-smartfarm e o Key Vault continuam provisionados: retomar exige devolver o
+# campo Password ao api-service e ao cache-service, republicar a porta do Redis
+# no IP privado e rodar este script.
+#
 # Equivale, no modelo de referência da AWS, ao conjunto
 # "Application Load Balancer + Auto Scaling Group + Launch Template":
 # o ingress do Container Apps faz o balanceamento e as regras de escala
@@ -38,15 +46,17 @@ VM_PRIVATE_IP="${VM_PRIVATE_IP:-10.0.0.4}"
 KV_NAME="${KV_NAME:-kv-smartfarm-tcc}"              # precisa ser único globalmente
 
 # Segredos e configuração da aplicação — devem vir do ambiente, nunca deste arquivo.
+#
+# A lista encolheu em set/2026 para acompanhar a versão funcional da `main`
+# (`fix: functional version`), que removeu do api-service o auth.go e o
+# supabase.go: AUTH_DOMAIN, AUTH_AUDIENCE, SUPABASE_URL e SUPABASE_KEY deixaram
+# de ser lidas pelo binário, e o cliente do Redis passou a ser aberto sem senha.
+# Declarar variáveis que o processo ignora só cria a ilusão de que a proteção
+# existe — daí terem saído daqui e do compose.
 : "${INFLUX_URL:?defina INFLUX_URL}"
 : "${INFLUX_TOKEN:?defina INFLUX_TOKEN}"
 : "${INFLUX_ORG:?defina INFLUX_ORG}"
 : "${INFLUX_BUCKET:?defina INFLUX_BUCKET}"
-: "${AUTH_DOMAIN:?defina AUTH_DOMAIN}"
-: "${AUTH_AUDIENCE:?defina AUTH_AUDIENCE}"
-: "${REDIS_PASSWORD:?defina REDIS_PASSWORD (a mesma senha do requirepass no compose)}"
-: "${SUPABASE_URL:?defina SUPABASE_URL (cadastro de sensores)}"
-: "${SUPABASE_KEY:?defina SUPABASE_KEY (cadastro de sensores)}"
 
 echo "==> Assinatura em uso:"
 az account show --query "{nome:name, id:id}" -o tsv
@@ -109,8 +119,6 @@ echo "    aguardando propagação da permissão RBAC..."
 sleep 30
 
 az keyvault secret set --vault-name "$KV_NAME" -n influx-token   --value "$INFLUX_TOKEN"   -o none
-az keyvault secret set --vault-name "$KV_NAME" -n redis-password --value "$REDIS_PASSWORD" -o none
-az keyvault secret set --vault-name "$KV_NAME" -n supabase-key   --value "$SUPABASE_KEY"   -o none
 
 # ---------------------------------------------------------------------------
 # 4. Container App
@@ -133,10 +141,7 @@ az containerapp create \
       INFLUX_URL="$INFLUX_URL" \
       INFLUX_ORG="$INFLUX_ORG" \
       INFLUX_BUCKET="$INFLUX_BUCKET" \
-      AUTH_DOMAIN="$AUTH_DOMAIN" \
-      AUTH_AUDIENCE="$AUTH_AUDIENCE" \
       REDIS_ADDR="${VM_PRIVATE_IP}:6379" \
-      SUPABASE_URL="$SUPABASE_URL" \
   --only-show-errors -o none
 
 # Identidade gerenciada: é ela que autoriza o app a ler o Key Vault,
@@ -156,25 +161,29 @@ KV_URI=$(az keyvault show -g "$RG" -n "$KV_NAME" --query properties.vaultUri -o 
 az containerapp secret set -g "$RG" -n "$APP_NAME" \
   --secrets \
      influx-token="keyvaultref:${KV_URI}secrets/influx-token,identityref:system" \
-     redis-password="keyvaultref:${KV_URI}secrets/redis-password,identityref:system" \
-     supabase-key="keyvaultref:${KV_URI}secrets/supabase-key,identityref:system" \
   --only-show-errors -o none
 
 az containerapp update -g "$RG" -n "$APP_NAME" \
   --set-env-vars \
      INFLUX_TOKEN=secretref:influx-token \
-     REDIS_PASSWORD=secretref:redis-password \
-     SUPABASE_KEY=secretref:supabase-key \
   --only-show-errors -o none
 
 # ---------------------------------------------------------------------------
 # 5. Sondas de saúde
 #
-# O endpoint /health já existe no api-service e não exige autenticação.
 # A sonda de readiness é o que permite ao ingress tirar do balanceamento uma
 # réplica que subiu mas ainda não está pronta.
+#
+# Eram sondas HTTP em /health até set/2026. A versão funcional da `main` não
+# tem mais essa rota — o Fiber responde 404, a sonda considera a réplica doente
+# e o ingress nunca a coloca no balanceamento; com liveness no mesmo endereço,
+# o contêiner ainda entra em ciclo de reinício. Passaram a ser sondas TCP na
+# porta da aplicação: verificam que o processo aceita conexão, que é o quanto
+# dá para afirmar sem uma rota de saúde. Voltando o /health ao api-service,
+# vale trocar de novo — httpGet distingue "processo vivo" de "aplicação
+# pronta", tcpSocket não.
 # ---------------------------------------------------------------------------
-echo "==> Configurando probes em /health"
+echo "==> Configurando probes TCP na porta 3000"
 TMP_YAML=$(mktemp)
 az containerapp show -g "$RG" -n "$APP_NAME" -o yaml > "$TMP_YAML"
 python - "$TMP_YAML" <<'PY'
@@ -183,9 +192,9 @@ path = sys.argv[1]
 with open(path) as f:
     doc = yaml.safe_load(f)
 probes = [
-    {"type": "Liveness",  "httpGet": {"path": "/health", "port": 3000},
+    {"type": "Liveness",  "tcpSocket": {"port": 3000},
      "initialDelaySeconds": 10, "periodSeconds": 30},
-    {"type": "Readiness", "httpGet": {"path": "/health", "port": 3000},
+    {"type": "Readiness", "tcpSocket": {"port": 3000},
      "initialDelaySeconds": 5,  "periodSeconds": 10},
 ]
 for c in doc["properties"]["template"]["containers"]:
@@ -219,11 +228,11 @@ echo "======================================================================"
 echo " Camada web provisionada."
 echo
 echo " URL da API : https://${FQDN}"
-echo " Health     : https://${FQDN}/health"
+echo " Teste      : https://${FQDN}/api/sensors/all/<userId>  (não há /health)"
 echo " Réplicas   : 1 a 5 (gatilho: 50 requisições simultâneas por réplica)"
 echo
 echo " Próximos passos:"
-echo "   1. Publicar o Redis no IP privado com senha (docker-compose.prod.yml)"
+echo "   1. Publicar o Redis no IP privado da VM (docker-compose.prod.yml)"
 echo "   2. Apontar VITE_API_BASE_URL do front para a URL acima"
 echo "   3. Remover caddy e api-service do compose da VM"
 echo "======================================================================"
