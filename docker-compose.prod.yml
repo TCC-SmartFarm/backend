@@ -8,33 +8,35 @@
 # dentro da rede do compose.
 #
 # ---------------------------------------------------------------------------
-# POR QUE AS IMAGENS ESTÃO PRESAS A UM DIGEST (set/2026)
+# A INGESTÃO VOLTOU PARA `:latest` — ou seja, para a `main` (25/09/2026)
 #
-# Estavam todas em `:latest`, e voltar para `:latest` derruba a telemetria.
-# A stack que funciona hoje é uma combinação específica de versões:
+# Entre 17 e 25/09 a ingestão ficou presa a digests de jun/ago: a combinação
+# `mqtt-sub` + `cache-service` de 10/ago (que leem o mqtt-broker próprio,
+# alimentado pelo sensor-simulator) com o `influx-connector` de 10/jun (que
+# grava a série com a tag `deviceId`). Era o que mantinha o painel com dado
+# enquanto o dispositivo LoRa estava fora do ar.
 #
-#   mqtt-sub, cache-service  10/ago — leem do mqtt-broker próprio, alimentado
-#                                     pelo sensor-simulator deste repositório
-#   influx-connector         10/jun — grava a série com a tag `deviceId`
+# A `main` é a outra arquitetura, e agora é a que vale: o `mqtt-sub` assina
+# `networkserver2.maua.br`, resolve o dono de cada devEUI no Supabase, e o
+# `influx-connector` grava a tag **`devEUI`** — que é justamente a que o
+# `api-service` da main procura. É o conjunto casado do fluxo LoRa, e é ele que
+# faz o gráfico do dispositivo real funcionar sem remendo nenhum.
 #
-# A `main` desses repositórios (`fix: functional version`) implementa a outra
-# arquitetura: o mqtt-sub assina `networkserver2.maua.br` e resolve o dono de
-# cada devEUI no Supabase, ignorando o broker próprio. É um conjunto coerente,
-# mas pressupõe dispositivo LoRa real transmitindo. Publicar essas imagens sem
-# um sensor em campo apaga a única fonte de dados que existe: o simulador
-# continua publicando e ninguém mais escuta.
+# O CUSTO, e é grande: o `mqtt-sub` da main **não lê o broker próprio** — as
+# linhas do `AddBroker("tcp://mqtt-broker:1883")` estão comentadas no código.
+# O `sensor-simulator` abaixo continua publicando e ninguém mais escuta. Os três
+# sensores simulados param de receber leitura nova; as chaves deles sobrevivem
+# no Redis pelo TTL de 30 dias e depois somem.
 #
-# Por isso o CI de cada repositório volta a buildar e publicar (o `:latest` do
-# GHCR volta a seguir a main), mas a produção só anda quando alguém troca o
-# digest aqui, conscientemente. Quando o sensor real entrar, é trocar estes
-# digests pelos `:latest` e remover o sensor-simulator.
+# Para reverter, os digests da combinação anterior estão no commit que este
+# substitui — `git log -p docker-compose.prod.yml`.
 # ---------------------------------------------------------------------------
 
 name: smartfarm
 
 services:
   mqtt-broker:
-    image: ghcr.io/tcc-smartfarm/mqtt-broker@sha256:672cbc28212c5148e79746c85f6a71cd896f2dd61b7621afbba23a3769c4c951
+    image: ghcr.io/tcc-smartfarm/mqtt-broker:latest
     container_name: mqtt-broker
     restart: unless-stopped
     volumes:
@@ -62,7 +64,7 @@ services:
       start_period: 30s
 
   config-rabbit:
-    image: ghcr.io/tcc-smartfarm/barramento-de-eventos@sha256:b2afd6bc7abdc1e7638c52999d6952bb36adf8ae9d115c6bab638c54da2fe5fd
+    image: ghcr.io/tcc-smartfarm/barramento-de-eventos:latest
     restart: "no" # one-shot: só cria exchange/fila e sai
     depends_on:
       rabbitmq:
@@ -71,7 +73,7 @@ services:
       - smartfarm-network
 
   mqtt-sub:
-    image: ghcr.io/tcc-smartfarm/mqtt-sub@sha256:776954fc80ced0f38dd496403e570499161928a73fc5610b32da48eb1e76c520
+    image: ghcr.io/tcc-smartfarm/mqtt-sub:latest
     container_name: mqtt-sub
     restart: unless-stopped
     # OBRIGATÓRIO: o mqtt-sub faz log.Fatal se SUPABASE_URL/SUPABASE_KEY não
@@ -86,7 +88,7 @@ services:
       - smartfarm-network
 
   influx-connector:
-    image: ghcr.io/tcc-smartfarm/influx-connector@sha256:3e09a0d87aa5ff29cd39faa31cb8aaa3d86cdf8e90d333068a3c509b8abc8622
+    image: ghcr.io/tcc-smartfarm/influx-connector:latest
     container_name: influx-connector
     restart: unless-stopped
     env_file:
@@ -128,7 +130,7 @@ services:
       retries: 5
 
   cache-service:
-    image: ghcr.io/tcc-smartfarm/cache-service@sha256:bab5fd21916bde67200baa8a4ec0fcdf53575a91e67ab909f8881a69d25c745c
+    image: ghcr.io/tcc-smartfarm/cache-service:latest
     container_name: cache-service
     restart: unless-stopped
     env_file:
