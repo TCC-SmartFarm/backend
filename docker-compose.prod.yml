@@ -22,14 +22,14 @@
 # `api-service` da main procura. É o conjunto casado do fluxo LoRa, e é ele que
 # faz o gráfico do dispositivo real funcionar sem remendo nenhum.
 #
-# O CUSTO, e é grande: o `mqtt-sub` da main **não lê o broker próprio** — as
-# linhas do `AddBroker("tcp://mqtt-broker:1883")` estão comentadas no código.
-# O `sensor-simulator` abaixo continua publicando e ninguém mais escuta. Os três
-# sensores simulados param de receber leitura nova; as chaves deles sobrevivem
-# no Redis pelo TTL de 30 dias e depois somem.
+# O `mqtt-sub` da main **não lê o broker próprio** — as linhas do
+# `AddBroker("tcp://mqtt-broker:1883")` estão comentadas no código. Por isso o
+# `sensor-simulator` saiu desta stack (19/10/2026): publicaria num broker que
+# ninguém escuta. O painel passa a mostrar só o sensor LoRa real. O volume
+# `simulator-data` continua na VM, órfão, com o marker do seed.
 #
-# Para reverter, os digests da combinação anterior estão no commit que este
-# substitui — `git log -p docker-compose.prod.yml`.
+# Para reverter, os digests da combinação anterior e o serviço do simulador
+# estão em `git log -p docker-compose.prod.yml` (commit dd0834f).
 # ---------------------------------------------------------------------------
 
 name: smartfarm
@@ -43,8 +43,8 @@ services:
       - broker-data:/root/data/db
     networks:
       - smartfarm-network
-    # Sem porta no host: o simulador roda dentro da rede. Quando houver
-    # sensores LoRa reais, adicionar "1883:1883" + regra no NSG da Azure.
+    # Sem porta no host. Hoje não tem cliente: o mqtt-sub da main assina o
+    # network server da Mauá. Fica por causa do depends_on do mqtt-sub.
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -188,34 +188,9 @@ services:
     networks:
       - smartfarm-network
 
-  sensor-simulator:
-    image: ghcr.io/tcc-smartfarm/sensor-simulator@sha256:cac22ab258b2d233e3e459bfd7ce958b277781d871a5e655eafa23afcfd09e41
-    container_name: sensor-simulator
-    restart: unless-stopped
-    environment:
-      - SEED_HISTORY=true
-      - TZ=America/Sao_Paulo
-      # O dono das leituras é o `sub` do Auth0 — o mesmo identificador que a API
-      # extrai do access token. O mqtt-sub tira este valor do tópico MQTT, então
-      # ele precisa bater exatamente com o que o token traz.
-      - "FARM=auth0|69cb0b64c7c55babb4694086"
-      # Conecta como admin porque a ACL do broker exige que o segundo nível do
-      # tópico seja igual ao usuário MQTT, e o broker só aceita credenciais
-      # fixas (fazenda0..3). Admin tem regra de ouro e publica em qualquer
-      # tópico. Some quando a ingestão passar para o network server.
-      - MQTT_USER=admin
-      - MQTT_PASS=admin
-    volumes:
-      - simulator-data:/data
-    depends_on:
-      - mqtt-broker
-    networks:
-      - smartfarm-network
-
 volumes:
   broker-data:
   redis-data:
-  simulator-data:
   # Preservados quando o caddy saiu da declaração, em ago/2026. Foi o que tornou
   # o retorno barato: o certificado emitido para o domínio da VM continua neste
   # volume, então o Caddy sobe com HTTPS sem pedir nada à Let's Encrypt.
