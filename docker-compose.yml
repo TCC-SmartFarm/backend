@@ -1,4 +1,4 @@
-# atualizado em 09/09/2026
+# atualizado em 21/10/2026
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -63,6 +63,8 @@ services:
     env_file:
       - ./influx-connector/.env
     depends_on:
+      - cache-service
+      - mqtt-broker
       - rabbitmq
     networks:
       - smartfarm-network
