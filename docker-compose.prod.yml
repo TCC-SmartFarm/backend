@@ -170,6 +170,26 @@ services:
     networks:
       - smartfarm-network
 
+  # Recomendação de irrigação (repo TCC-SmartFarm/irrigacao-mss, out/2026).
+  # Não tem porta no host: o público chama /api/v1/irrigation no api-service,
+  # que repassa para cá via IRRIGATION_MSS_URL=http://irrigacao-mss:8456 (em
+  # env/api-service.env). O MSS, por sua vez, busca as leituras de volta no
+  # api-service (/api/sensors/latest), a localização no Supabase e a previsão
+  # no Open-Meteo. Os dois se chamam mutuamente, então não há depends_on: cada
+  # um responde 502/503 enquanto o outro ainda não subiu.
+  #
+  # env/irrigacao-mss.env PRECISA existir na VM antes deste serviço chegar lá,
+  # senão o `up -d` do deploy falha para a stack inteira. Ele é criado por
+  # scripts/setup-irrigacao-env.sh.
+  irrigacao-mss:
+    image: ghcr.io/tcc-smartfarm/irrigacao-mss:latest
+    container_name: irrigacao-mss
+    restart: unless-stopped
+    env_file:
+      - ./env/irrigacao-mss.env
+    networks:
+      - smartfarm-network
+
   caddy:
     image: caddy:2-alpine
     container_name: caddy

@@ -5,6 +5,7 @@ cache-service/
 influx-connector/
 mqtt-broker/
 mqtt-sub/
+irrigacao-mss/
 
 # Dados locais dos containers
 data/
