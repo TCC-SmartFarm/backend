@@ -1,4 +1,4 @@
-# atualizado em 21/10/2026
+# atualizado em 22/10/2026
 
 services:
   # 1. Broker MQTT Customizado (O coração da ingestão LoRa)
@@ -104,26 +104,18 @@ services:
     networks:
       - smartfarm-network
 
-  # Sensores falsos: publica leituras no broker a cada 15 min.
-  # SEED_HISTORY fica false em dev: o influx-connector local escreve no MESMO
-  # InfluxDB Cloud da produção, e o seed de 30 dias deve acontecer só na VM.
-  sensor-simulator:
-    build: ./sensor-simulator
-    container_name: sensor-simulator
+#####
+  irrigacao-mss:
+    build: ./irrigacao-mss
+    container_name: irrigacao-mss
     restart: always
-    environment:
-      - SEED_HISTORY=false
-      - TZ=America/Sao_Paulo
-    volumes:
-      - simulator-data:/data
-    depends_on:
-      - mqtt-broker
+    env_file:
+      - ./irrigacao-mss/.env
+    ports:
+      - "8456:8456"
     networks:
       - smartfarm-network
 
-
-volumes:
-  simulator-data:
 
 # Rede isolada para comunicação segura entre os containers
 networks:
